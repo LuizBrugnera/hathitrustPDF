@@ -3,72 +3,115 @@ import requests
 import re
 import os
 from pathlib import Path
-from PyPDF2 import PdfFileMerger
+from PyPDF2 import PdfMerger
 import progressbar
 
+def PDFDownload(output_line, actual_page, path_folder):
+    try:
+        PDF_download = requests.get(output_line, stream=True, timeout=300)
+        with open(os.path.join(path_folder, f'page{actual_page}.pdf'), 'wb') as f:
+            f.write(PDF_download.content)
+    except requests.exceptions.RequestException as e:
+        print(f"Error downloading the page {actual_page}: {e}")
 
-def PDFDownload(output_line):
-    PDF_download = requests.get(output_line, stream=True, timeout=300)
-    with open(path_folder + 'page' + str(actual_page) + '.pdf', 'wb') as f:
-        f.write(PDF_download.content)
+def merge_pdfs(path_folder, name_output):
+    merger = PdfMerger()
 
+    arquivos = os.listdir(path_folder)
 
-# Get hathitrust book link
-link = "https://babel.hathitrust.org/cgi/pt?id=txu.059173023561817"
-id_book = re.findall('id=(\w*\.\d*)|$', link)[0]
-r = requests.get(link)
-soup = BeautifulSoup(r.text, "html.parser")
+    pdfs = sorted(
+        [arquivo for arquivo in arquivos if arquivo.lower().endswith('.pdf')],
+        key=lambda x: int(re.findall(r'\d+', x)[0]) if re.findall(r'\d+', x) else 0
+    )
 
-# Number of the book pages and name
-pages_book = int(soup.find("section", {'class': 'd--reader--viewer'})['data-total-seq'])
-name_book = soup.find('meta', {'property': 'og:title'})['content']
+    for pdf in pdfs:
+        caminho_pdf = os.path.join(path_folder, pdf)
+        try:
+            merger.append(caminho_pdf)
+            print(f'Added: {pdf}')
+        except Exception as e:
+            print(f"Error adding {pdf}: {e}")
 
-# Limit book title
-if len(name_book) > 55:
-    name_book = name_book[:40]
+    caminho_output = os.path.join(path_folder, name_output)
+    try:
+        with open(caminho_output, 'wb') as arquivo_output:
+            merger.write(arquivo_output)
+        print(f'\nPDFs successfully merged into: {caminho_output}')
+    except Exception as e:
+        print(f"Error writing final PDF: {e}")
+    finally:
+        merger.close()
 
-# Remove invalid characters
-remove_character = "[],/\\:.;\"'?!*"
-name_book = name_book.translate(
-            str.maketrans(remove_character, len(remove_character)*" ")).strip()
+def main():
+    link = "https://babel.hathitrust.org/cgi/pt?id=ufl.31262094199295&seq=7" ## insert the link to the book
+    size_pages_pdf = 1122  ## insert the size of the pages you want to download
+    id_book_match = re.findall(r'id=([\w\.]+)', link)
+    if not id_book_match:
+        raise ValueError("Invalid link format. Unable to extract book ID.")
+    id_book = id_book_match[0]
 
-# Create a new folder
-local = os.getcwd()
-Path(local + "/" + name_book).mkdir(parents=True, exist_ok=True)
-path_folder = local + "/" + name_book + "/"
+    try:
+        r = requests.get(link, timeout=30)
+        r.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise SystemExit(f"Error accessing the link: {e}")
 
-# Download pdf file
-begin_page = 1
-last_page = pages_book + 1
+    soup = BeautifulSoup(r.text, "html.parser")
 
-# ProgressBar
-bar = progressbar.ProgressBar(maxval=last_page,
-                              widgets=[progressbar.Bar('=', '[', ']'), ' ',
-                                       progressbar.Percentage()])
-bar.start()
+    script_tag = soup.find("script", text=re.compile("HT.params.totalSeq"))
+    if not script_tag:
+        raise ValueError("Unable to find script with 'HT.params.totalSeq'")
+    script_text = script_tag.string
+    pages_match = re.search(r'HT.params.totalSeq\s*=\s*(\d+);', script_text)
+    if not pages_match:
+        raise ValueError("Unable to extract the total number of pages")
+    pages_book = int(pages_match.group(1))
 
-for actual_page in range(begin_page, last_page):
-    output_line = f'https://babel.hathitrust.org/cgi/imgsrv/download/pdf?id={id_book};orient=0;size=100;seq={actual_page};attachment=0'
-    PDFDownload(output_line)
+    name_meta = soup.find('meta', {'property': 'og:title'})
+    if name_meta and 'content' in name_meta.attrs:
+        name_book = name_meta['content']
+    else:
+        raise ValueError("Unable to find book title")
 
-    while os.path.getsize(path_folder + 'page' + str(actual_page) + '.pdf') < 6000:
-        PDFDownload(output_line)
+    if len(name_book) > 55:
+        name_book = name_book[:40]
 
-    bar.update(actual_page + 1)
+    remove_character = "[],/\\:.;\"'?!*"
+    translation_table = str.maketrans({char: ' ' for char in remove_character})
+    name_book = name_book.translate(translation_table).strip()
 
+    local = os.getcwd()
+    path_folder = os.path.join(local, name_book)
+    Path(path_folder).mkdir(parents=True, exist_ok=True)
 
-# Merge all pdf files
-ordered_files = sorted(os.listdir(path_folder),
-                       key=lambda x: (int(re.sub('\D', '', x)), x))
+    begin_page = 1
+    last_page = pages_book + 1
 
-pdf_list = [path_folder + a for a in ordered_files if a.endswith(".pdf")]
-merger = PdfFileMerger()
+    bar = progressbar.ProgressBar(maxval=last_page - begin_page,
+                                  widgets=[progressbar.Bar('=', '[', ']'), ' ',
+                                           progressbar.Percentage()])
+    bar.start()
 
-for pdf in pdf_list:
-    merger.append(open(pdf, 'rb'))
+    for actual_page in range(begin_page, last_page):
+        output_line = f'https://babel.hathitrust.org/cgi/imgsrv/download/pdf?id={id_book};orient=0;size={size_pages_pdf};seq={actual_page};attachment=0'
+        PDFDownload(output_line, actual_page, path_folder)
 
-with open(path_folder + name_book + "_output.pdf", "wb") as fout:
-    merger.write(fout)
-    merger.close()
+        pdf_path = os.path.join(path_folder, f'page{actual_page}.pdf')
+        attempts = 0
+        while os.path.getsize(pdf_path) < 6000 and attempts < 5:
+            print(f"Insufficient size for page {actual_page}. Trying again...")
+            PDFDownload(output_line, actual_page, path_folder)
+            attempts += 1
 
-bar.finish()
+        if os.path.getsize(pdf_path) < 6000:
+            print(f"Fail to download {actual_page} after {attempts} trys.")
+
+        bar.update(actual_page - begin_page + 1)
+
+    bar.finish()
+
+    name_pdf_output = f"{name_book}_output.pdf"
+    merge_pdfs(path_folder, name_pdf_output)
+
+if __name__ == "__main__":
+    main()
